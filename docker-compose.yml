@@ -15,6 +15,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     networks: [swag-net]
 
+    healthcheck:
+      test: ["CMD-SHELL", "cat < /dev/null > /dev/tcp/127.0.0.1/2375"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
   swag-ui:
     build: .
     restart: unless-stopped
@@ -28,6 +35,11 @@ services:
     ports:
       - 8080:8080
     networks: [default, swag-net]
+    healthcheck:
+      test: ["CMD-SHELL", "cat < /dev/null > /dev/tcp/127.0.0.1/8080"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
 networks:
   swag-net:
