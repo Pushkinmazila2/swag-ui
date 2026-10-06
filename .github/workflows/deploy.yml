@@ -48,10 +48,10 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: . # Соответствует директории сборки (build: . в docker-compose)
-          file: ./Dockerfile # Путь к вашему Dockerfile
+          context: .
+          file: ./Dockerfile
           push: true
-          tags: ${{ id.meta.outputs.tags }}
-          labels: ${{ id.meta.outputs.labels }}
-          cache-from: type=gha # Использование кэша GitHub Actions для ускорения повторных сборок
+          tags: ${{ steps.meta.outputs.tags }}    # Исправлено: id заменено на steps
+          labels: ${{ steps.meta.outputs.labels }} # Исправлено: id заменено на steps
+          cache-from: type=gha
           cache-to: type=gha,mode=max
