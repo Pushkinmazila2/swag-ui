@@ -1,7 +1,7 @@
 services:
   
   swag-guard:
-    build: .
+    image: ghcr.io/pushkinmazila2/swag-ui:latest
     entrypoint: ["/swagui", "guard"]
     restart: unless-stopped
     environment:
@@ -23,7 +23,7 @@ services:
       start_period: 5s
 
   swag-ui:
-    build: .
+    image: ghcr.io/pushkinmazila2/swag-ui:latest
     restart: unless-stopped
     environment:
       - SWAG_CONTAINER=swag
