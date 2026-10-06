@@ -2,7 +2,7 @@ services:
   
   swag-guard:
     build: .
-    command: ["/app", "guard"]
+    entrypoint: ["/swagui", "guard"]
     restart: unless-stopped
     environment:
       - SWAG_CONTAINER=swag
