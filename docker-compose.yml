@@ -31,7 +31,7 @@ services:
       - UI_USER=admin
       - UI_PASS=${UI_PASS}
     volumes:
-      - /var/lib/docker/volumes/dockhand_data/_data/stacks/NL/let-s-encrypt-swag/config:/config   # без docker.sock
+      - ${SWAG_CONFIG_PATH}:/config
     ports:
       - 8080:8080
     networks: [default, swag-net]
