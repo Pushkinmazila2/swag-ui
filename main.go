@@ -209,6 +209,7 @@ func dkPost(path string, body any) []byte {
 }
 
 func run(cmd ...string) (string, int) {
+  log.Printf("[UI-DOCKER] Initiating 'exec' command inside swag container: %v", cmd)
 	if dkURL == "" {
 		return "docker api off", 1
 	}
@@ -234,17 +235,24 @@ func run(cmd ...string) (string, int) {
 		json.NewDecoder(resp.Body).Decode(&st)
 		resp.Body.Close()
 	}
+	log.Printf("[UI-DOCKER] Exec process finished. Command: %v. ExitCode: %d", cmd, st.ExitCode)
 	return out.String(), st.ExitCode
 }
 
 func apply() (string, bool) {
+	log.Println("[UI-RELOAD] Configuration change triggered. Running 'nginx -t' validation...")
 	o, c := run("nginx", "-t")
 	ok := c == 0
 	if ok {
+		log.Println("[UI-RELOAD] 'nginx -t' passed successfully. Executing 'nginx -s reload'...")
 		o2, c2 := run("nginx", "-s", "reload")
 		o, ok = o+o2, c2 == 0
+	} else {
+		log.Println("[UI-RELOAD] CRITICAL: 'nginx -t' validation failed. Reload aborted to prevent downtime.")
 	}
+	
 	lastAt, lastOK = time.Now(), ok
+	log.Printf("[UI-RELOAD] Finished configuration application cycle. Success status: %v", ok)
 	return o, ok
 }
 
@@ -262,10 +270,10 @@ func lastApply() string {
 // ---- guard mode: minimal filtering proxy in front of docker.sock ----
 
 func guardMode() {
-	initDocker()
 	if dkURL == "" {
-		log.Fatal("guard: no docker socket")
+		log.Fatal("[GUARD] Critical error: no docker socket or DOCKER_HOST found")
 	}
+	log.Printf("[GUARD] Successfully connected to backend Docker API at: %s", dkURL)
 	var mu sync.Mutex
 	known := map[string]bool{}
 	cmds := map[string]bool{"nginx -t": true, "nginx -s reload": true}
@@ -280,7 +288,7 @@ func guardMode() {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, b
 	}
-
+  
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		p, code, out := r.URL.Path, 403, []byte("forbidden by swag-guard")
@@ -320,6 +328,7 @@ func guardMode() {
 
 	log.Fatal(http.ListenAndServe(env("LISTEN", ":2375"), mux))
 }
+
 
 
 // ---- html ----
@@ -743,7 +752,7 @@ func guard(h http.HandlerFunc) http.HandlerFunc {
 		u, p, ok := r.BasicAuth()
 		if !ok || subtle.ConstantTimeCompare([]byte(u), []byte(user)) != 1 || subtle.ConstantTimeCompare([]byte(p), []byte(pass)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="swag-ui"`)
-			http.Error(w, "auth", 401)
+			http.Error(w, "auth2", 401)
 			return
 		}
 		if r.Method == "POST" {
@@ -759,16 +768,38 @@ func guard(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func main() {
-  if len(os.Args) > 1 && os.Args[1] == "guard" {
+
+	if len(os.Args) > 1 && os.Args[1] == "guard" {
+		log.Printf("[GUARD] Starting swag-guard proxy server on port %s...", env("LISTEN", ":2375"))
 		guardMode()
 		return
 	}
+
+	log.Printf("[UI] Starting swag-ui web interface on port %s...", env("LISTEN", ":8080"))
 	if pass == "" {
-		log.Fatal("UI_PASS is required")
+		log.Fatal("[UI] Critical error: UI_PASS environment variable is required but not set")
 	}
+
+	log.Println("[UI] Initializing Docker connection settings...")
 	initDocker()
-	for p, h := range map[string]http.HandlerFunc{"/": dash, "/containers": containers, "/confs": confs, "/files": files, "/certs": certsTab, "/new": newf, "/edit": edit, "/save": save, "/toggle": toggle, "/reload": reload} {
+	log.Printf("[UI] Docker API URL configured as: %s", dkURL)
+
+
+	for p, h := range map[string]http.HandlerFunc{
+		"/":            dash,
+		"/containers":  containers,
+		"/confs":       confs,
+		"/files":       files,
+		"/certs":       certsTab,
+		"/new":         newf,
+		"/edit":        edit,
+		"/save":        save,
+		"/toggle":      toggle,
+		"/reload":      reload,
+	} {
 		http.HandleFunc(p, guard(h))
 	}
+
+	log.Println("[UI] Web interface routes successfully registered. Ready for connections.")
 	log.Fatal(http.ListenAndServe(env("LISTEN", ":8080"), nil))
 }
