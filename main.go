@@ -274,62 +274,106 @@ func guardMode() {
 		log.Fatal("[GUARD] Critical error: no docker socket or DOCKER_HOST found")
 	}
 	log.Printf("[GUARD] Successfully connected to backend Docker API at: %s", dkURL)
+	
 	var mu sync.Mutex
 	known := map[string]bool{}
 	cmds := map[string]bool{"nginx -t": true, "nginx -s reload": true}
+	
 	do := func(method, path string, body []byte) (int, []byte) {
+		log.Printf("[GUARD-PROXY] Forwarding request to Docker: %s %s", method, path)
 		req, _ := http.NewRequest(method, dkURL+path, bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := hc.Do(req)
 		if err != nil {
+			log.Printf("[GUARD-ERROR] Failed to contact Docker daemon: %v", err)
 			return 502, []byte(err.Error())
 		}
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
+		log.Printf("[GUARD-PROXY] Docker backend responded with status: %d (bytes received: %d)", resp.StatusCode, len(b))
 		return resp.StatusCode, b
 	}
-  
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		p, code, out := r.URL.Path, 403, []byte("forbidden by swag-guard")
+		log.Printf("[GUARD-REQUEST] Incoming intercept: %s %s from %s", r.Method, p, r.RemoteAddr)
+
 		isID := func(suffix string) (string, bool) {
 			id := strings.TrimSuffix(strings.TrimPrefix(p, "/exec/"), suffix)
 			mu.Lock()
 			defer mu.Unlock()
-			return id, strings.HasPrefix(p, "/exec/") && strings.HasSuffix(p, suffix) && known[id]
+			hasPrefix := strings.HasPrefix(p, "/exec/")
+			hasSuffix := strings.HasSuffix(p, suffix)
+			isKnown := known[id]
+			return id, hasPrefix && hasSuffix && isKnown
 		}
+
 		switch {
 		case r.Method == "GET" && p == "/containers/json":
+			log.Println("[GUARD-ACCESS] Route allowed: listing containers")
 			code, out = do("GET", p, nil)
+
 		case r.Method == "POST" && p == "/containers/"+swag+"/exec":
 			var q struct{ Cmd []string }
-			if json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&q) == nil && cmds[strings.Join(q.Cmd, " ")] {
-				bs, _ := json.Marshal(map[string]any{"AttachStdout": true, "AttachStderr": true, "Cmd": q.Cmd})
-				code, out = do("POST", p, bs)
-				var x struct{ Id string }
-				if json.Unmarshal(out, &x) == nil && x.Id != "" {
-					mu.Lock()
-					known[x.Id] = true
-					mu.Unlock()
+			// Читаем тело запроса аккуратно, логируя попытки
+			bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 1024))
+			r.Body.Close()
+			
+			if json.Unmarshal(bodyBytes, &q) == nil {
+				fullCmd := strings.Join(q.Cmd, " ")
+				log.Printf("[GUARD-EXEC] Intercepted exec request for container '%s'. Command: '%s'", swag, fullCmd)
+				
+				if cmds[fullCmd] {
+					log.Printf("[GUARD-ACCESS] Command '%s' is VALID. Proxying exec creation...", fullCmd)
+					bs, _ := json.Marshal(map[string]any{"AttachStdout": true, "AttachStderr": true, "Cmd": q.Cmd})
+					code, out = do("POST", p, bs)
+					
+					var x struct{ Id string }
+					if json.Unmarshal(out, &x) == nil && x.Id != "" {
+						mu.Lock()
+						known[x.Id] = true
+						mu.Unlock()
+						log.Printf("[GUARD-TRACK] Registered approved Exec ID: %s", x.Id)
+					}
+				} else {
+					log.Printf("[GUARD-DENIED] Security alert: Command '%s' is NOT ALLOWED inside container '%s'", fullCmd, swag)
+					code = 403
+					out = []byte("forbidden command by swag-guard")
 				}
+			} else {
+				log.Println("[GUARD-ERROR] Failed to parse JSON body for container exec request")
+				code = 400
+				out = []byte("bad request")
 			}
+
 		case r.Method == "POST":
-			if _, ok := isID("/start"); ok {
+			if id, ok := isID("/start"); ok {
+				log.Printf("[GUARD-ACCESS] Route allowed: Starting previously approved Exec session ID: %s", id)
 				code, out = do("POST", p, []byte("{}"))
+			} else {
+				log.Printf("[GUARD-DENIED] Blocked unauthorized POST request or unverified Exec ID on path: %s", p)
 			}
+
 		case r.Method == "GET":
-			if _, ok := isID("/json"); ok {
+			if id, ok := isID("/json"); ok {
+				log.Printf("[GUARD-ACCESS] Route allowed: Inspecting approved Exec session results for ID: %s", id)
 				code, out = do("GET", p, nil)
+			} else {
+				log.Printf("[GUARD-DENIED] Blocked unauthorized GET request or unverified Exec ID on path: %s", p)
 			}
+			
+		default:
+			log.Printf("[GUARD-DENIED] Request method/path combination is completely unhandled: %s %s", r.Method, p)
 		}
+
 		w.WriteHeader(code)
 		w.Write(out)
 	})
 
+	log.Printf("[GUARD] Server is up and listening on port %s", env("LISTEN", ":2375"))
 	log.Fatal(http.ListenAndServe(env("LISTEN", ":2375"), mux))
 }
-
-
 
 // ---- html ----
 
@@ -768,23 +812,27 @@ func guard(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func main() {
-
+	// 1. РЕЖИМ ПРОКСИ (swag-guard)
 	if len(os.Args) > 1 && os.Args[1] == "guard" {
-		log.Printf("[GUARD] Starting swag-guard proxy server on port %s...", env("LISTEN", ":2375"))
+		log.Printf("[GUARD] Инициализация Docker подключения для прокси-сервера...")
+		initDocker()
+		log.Printf("[GUARD] Путь к Docker API настроен как: %s", dkURL)
+		log.Printf("[GUARD] Запуск защитного прокси swag-guard на порту %s...", env("LISTEN", ":2375"))
 		guardMode()
 		return
 	}
 
-	log.Printf("[UI] Starting swag-ui web interface on port %s...", env("LISTEN", ":8080"))
+	// 2. РЕЖИМ ВЕБ-ИНТЕРФЕЙСА (swag-ui)
+	log.Printf("[UI] Запуск веб-интерфейса swag-ui на порту %s...", env("LISTEN", ":8080"))
 	if pass == "" {
-		log.Fatal("[UI] Critical error: UI_PASS environment variable is required but not set")
+		log.Fatal("[UI] Критическая ошибка: Переменная окружения UI_PASS обязательна, но не задана")
 	}
 
-	log.Println("[UI] Initializing Docker connection settings...")
+	log.Println("[UI] Инициализация Docker подключения для интерфейса...")
 	initDocker()
-	log.Printf("[UI] Docker API URL configured as: %s", dkURL)
+	log.Printf("[UI] Путь к Docker API настроен как: %s", dkURL)
 
-
+	log.Println("[UI] Регистрация маршрутов веб-интерфейса...")
 	for p, h := range map[string]http.HandlerFunc{
 		"/":            dash,
 		"/containers":  containers,
@@ -797,9 +845,11 @@ func main() {
 		"/toggle":      toggle,
 		"/reload":      reload,
 	} {
+		// Используем стандартный http.HandleFunc, так как в режиме UI 
+		// нам не нужно изолировать роутер от самого себя
 		http.HandleFunc(p, guard(h))
 	}
 
-	log.Println("[UI] Web interface routes successfully registered. Ready for connections.")
+	log.Println("[UI] Веб-интерфейс успешно запущен и готов к приему соединений.")
 	log.Fatal(http.ListenAndServe(env("LISTEN", ":8080"), nil))
 }
