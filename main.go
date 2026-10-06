@@ -440,6 +440,7 @@ func dash(w http.ResponseWriter, r *http.Request) {
 	}
 	var s strings.Builder
 	s.WriteString("<h3>services (active proxy-confs &rarr; upstream &rarr; container)</h3>" + tbl + "<tr><th>conf<th>server_name<th>upstream<th>container<th>container status<th>swag net<th>cert</tr>")
+	
 	for _, u := range ups {
 		cn, st, nt := "-", "-", "-"
 		if derr == "" {
@@ -454,7 +455,37 @@ func dash(w http.ResponseWriter, r *http.Request) {
 				prob = append(prob, "upstream "+u.App+":"+u.Port+" not matched to a container ("+u.Conf+")")
 			}
 		}
-		fmt.Fprintf(&s, "<tr><td>%s<td>%s<td>%s:%s<td>%s<td>%s<td>%s<td>%s</tr>", e(u.Conf), e(u.Host), e(u.App), e(u.Port), e(cn), e(st), nt, certOf[u.Conf])
+
+		// ---- МОДЕРНИЗАЦИЯ: Разбираем хосты и делаем их кликабельными ссылками ----
+		var links []string
+		// server_name может содержать несколько доменов через пробел
+		for _, rawHost := range strings.Fields(u.Host) {
+			if rawHost == "_" {
+				links = append(links, "_")
+				continue
+			}
+
+			displayHost := rawHost
+			// Если домен заканчивается на .*, ищем реальный домен в сертификатах
+			if pre, ok := strings.CutSuffix(rawHost, ".*"); ok && len(cs) > 0 {
+				for _, c := range cs {
+					fullMatch := pre + "." + c.Name
+					if c.covers(fullMatch) {
+						displayHost = fullMatch
+						break
+					}
+				}
+			}
+
+			// Оборачиваем готовый домен в красивую HTML-ссылку
+			links = append(links, fmt.Sprintf("<a href='https://%s' target='_blank' style='text-decoration:underline; color:#0066cc;'>%s</a>", displayHost, e(displayHost)))
+		}
+		// Склеиваем ссылки обратно через пробел
+		formattedHosts := strings.Join(links, " ")
+		// -----------------------------------------------------------------------
+
+		// Выводим строку таблицы (вместо e(u.Host) теперь подставляем нашу строку formattedHosts)
+		fmt.Fprintf(&s, "<tr><td>%s<td>%s<td>%s:%s<td>%s<td>%s<td>%s<td>%s</tr>", e(u.Conf), formattedHosts, e(u.App), e(u.Port), e(cn), e(st), nt, certOf[u.Conf])
 	}
 	s.WriteString("</table>")
 	pr := "none"
@@ -469,6 +500,7 @@ func dash(w http.ResponseWriter, r *http.Request) {
 	head := fmt.Sprintf("<h3>status</h3>"+tbl+"<tr><td>last nginx apply<td>%s</tr><tr><td>proxy-confs active / samples<td>%d / %d</tr><tr><td>certificates<td>%d</tr><tr><td>running containers<td>%s</tr><tr><td>problems<td>%s</tr></table>", e(lastApply()), on, off, len(cs), run, pr)
 	page(w, "", head+s.String())
 }
+
 
 func containers(w http.ResponseWriter, r *http.Request) {
 	cts, derr := loadCts()
