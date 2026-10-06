@@ -7,7 +7,7 @@ services:
     environment:
       - SWAG_CONTAINER=swag
       - UI_USER=admin
-      - UI_PASS=password
+      - UI_PASS=${UI_PASS}
       - LISTEN=0.0.0.0:2375
     ports:
       - 2375:2375
@@ -22,7 +22,7 @@ services:
       - SWAG_CONTAINER=swag
       - DOCKER_HOST=tcp://swag-guard:2375
       - UI_USER=admin
-      - UI_PASS=password
+      - UI_PASS=${UI_PASS}
     volumes:
       - /var/lib/docker/volumes/dockhand_data/_data/stacks/NL/let-s-encrypt-swag/config:/config   # без docker.sock
     ports:
