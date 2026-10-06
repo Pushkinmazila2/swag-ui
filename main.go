@@ -280,7 +280,9 @@ func guardMode() {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, b
 	}
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		p, code, out := r.URL.Path, 403, []byte("forbidden by swag-guard")
 		isID := func(suffix string) (string, bool) {
 			id := strings.TrimSuffix(strings.TrimPrefix(p, "/exec/"), suffix)
@@ -315,8 +317,10 @@ func guardMode() {
 		w.WriteHeader(code)
 		w.Write(out)
 	})
-	log.Fatal(http.ListenAndServe(env("LISTEN", ":2375"), nil))
+
+	log.Fatal(http.ListenAndServe(env("LISTEN", ":2375"), mux))
 }
+
 
 // ---- html ----
 
