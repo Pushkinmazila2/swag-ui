@@ -800,6 +800,34 @@ func guard(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func main() {
+	// 0. РЕЖИМ HEALTHCHECK (для Docker Healthcheck)
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		// Читаем LISTEN. Если пусто (как в режиме UI), берем дефолтный порт интерфейса :8080
+		addr := os.Getenv("LISTEN")
+		if addr == "" {
+			addr = ":8080"
+		}
+
+		// Если адрес указан как "0.0.0.0:2375", net.Dial может не сработать локально на некоторых системах.
+		// Поэтому заменяем хост на 127.0.0.1 для внутренней проверки безопасности.
+		if strings.Contains(addr, ":") {
+			parts := strings.Split(addr, ":")
+			port := parts[len(parts)-1]
+			addr = "127.0.0.1:" + port
+		} else {
+			// На случай, если в LISTEN передали чистый порт вроде "8080"
+			addr = "127.0.0.1:" + addr
+		}
+
+		// Проверяем доступность TCP-порта приложения
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err != nil {
+			// Контейнер не слушает порт — сигнализируем Docker об ошибке
+			os.Exit(1)
+		}
+		conn.Close()
+		os.Exit(0)
+	}
 	// 1. РЕЖИМ ПРОКСИ (swag-guard)
 	if len(os.Args) > 1 && os.Args[1] == "guard" {
 		log.Printf("[GUARD] Инициализация Docker подключения для прокси-сервера...")

@@ -16,7 +16,7 @@ services:
     networks: [swag-net]
 
     healthcheck:
-      test: ["CMD-SHELL", "cat < /dev/null > /dev/tcp/127.0.0.1/2375"]
+      test: ["CMD", "/swagui", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -36,7 +36,7 @@ services:
       - 8080:8080
     networks: [default, swag-net]
     healthcheck:
-      test: ["CMD-SHELL", "cat < /dev/null > /dev/tcp/127.0.0.1/8080"]
+      test: ["CMD", "/swagui", "healthcheck"]
       interval: 15s
       timeout: 5s
       retries: 3

@@ -31,9 +31,9 @@ var (
 	proxyRe   = regexp.MustCompile(`^\s*proxy_pass\s`)
 	listenRe  = regexp.MustCompile(`(?m)^\s*listen\s+[^;]*443`)
 	locPathRe = regexp.MustCompile(`^(\^~ |= |~\*? )?[/^][A-Za-z0-9/._()?|^$*+\[\]-]{0,98}$`)
-	hostRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$`)
+	hostRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 	slugRe    = regexp.MustCompile(`[^A-Za-z0-9]+`)
-	curlOK    = regexp.MustCompile(`^curl -sS -m 5 -o /dev/null -w %\{http_code\} http://[A-Za-z0-9][A-Za-z0-9.-]{0,62}:[0-9]{1,5}/[A-Za-z0-9/._-]{0,80}$`)
+	curlOK    = regexp.MustCompile(`^curl -sS -k -m 5 -o /dev/null -w %\{http_code\} https?://[A-Za-z0-9][A-Za-z0-9._-]{0,62}:[0-9]{1,5}/[A-Za-z0-9/._-]{0,80}$`)
 
 	testMu sync.Mutex
 	tests  = map[string]testRes{}
@@ -96,21 +96,49 @@ func label(k string) string {
 
 func readBase(rel string) string { b, _ := os.ReadFile(filepath.Join(base, rel)); return string(b) }
 
-// upstream host/port of the auth service, parsed from <provider>-server.conf
-func (p prov) endpoint() (string, int) {
+// scheme/host/port of the auth service, parsed from <provider>-server.conf.
+// The host is a container on swag's docker network or any remote host/IP;
+// https (typical for a remote server) is proxied with SNI, cert is not verified.
+func (p prov) endpoint() (string, string, int) {
 	s, v := readBase(p.srv()), regexp.QuoteMeta(p.Var)
-	host, port := p.Host, p.Port
+	scheme, host, port := "http", p.Host, p.Port
+	if m := regexp.MustCompile(`proxy_pass\s+(https?)://` + v).FindStringSubmatch(s); m != nil {
+		scheme = m[1]
+	}
 	if m := regexp.MustCompile(`set\s+` + v + `\s+([^;\s]+)\s*;`).FindStringSubmatch(s); m != nil {
 		host = m[1]
 	}
-	re := `proxy_pass\s+http://` + v + `:(\d+)`
+	re := `proxy_pass\s+https?://` + v + `:(\d+)`
 	if p.Key == "ldap" {
 		re = `set\s+\$upstream_auth_port\s+(\d+)\s*;`
 	}
 	if m := regexp.MustCompile(re).FindStringSubmatch(s); m != nil {
 		port, _ = strconv.Atoi(m[1])
 	}
-	return host, port
+	return scheme, host, port
+}
+
+// nginx does not send SNI unless asked: keep proxy_ssl_server_name/proxy_ssl_name
+// next to every proxy_pass of this provider for https, drop them for http.
+func fixTLS(s, v, scheme string) string {
+	lines, out := strings.Split(s, "\n"), []string(nil)
+	ppRe := regexp.MustCompile(`^(\s*)proxy_pass\s+https?://` + regexp.QuoteMeta(v) + `[:;\s]`)
+	sslRe := regexp.MustCompile(`^\s*proxy_ssl_(server_name\s+(on|off)|name\s+\S+)\s*;`)
+	for i := 0; i < len(lines); i++ {
+		m := ppRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			out = append(out, lines[i])
+			continue
+		}
+		out = append(out, lines[i])
+		for i+1 < len(lines) && sslRe.MatchString(lines[i+1]) {
+			i++
+		}
+		if scheme == "https" {
+			out = append(out, m[1]+"proxy_ssl_server_name on;", m[1]+"proxy_ssl_name "+v+";")
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func ldapGet(s, key string) string {
@@ -147,7 +175,7 @@ func ldapServer(s string) (host string, port int, ok bool) {
 	return u.Hostname(), port, true
 }
 
-// ---------------- connection tests (run inside swag, same network as nginx) ----------------
+// ---------------- connection tests (run inside swag: local and remote endpoints are probed as nginx reaches them) ----------------
 
 type testRes struct {
 	At  time.Time
@@ -155,8 +183,9 @@ type testRes struct {
 	Msg string
 }
 
-func curl(host string, port int, path string) (string, int, string) {
-	out, code := run("curl", "-sS", "-m", "5", "-o", "/dev/null", "-w", "%{http_code}", "http://"+host+":"+strconv.Itoa(port)+path)
+// -k: the probe must work even when a remote server uses a self-signed certificate
+func curl(scheme, host string, port int, path string) (string, int, string) {
+	out, code := run("curl", "-sS", "-k", "-m", "5", "-o", "/dev/null", "-w", "%{http_code}", scheme+"://"+host+":"+strconv.Itoa(port)+path)
 	hc := "000"
 	if len(out) >= 3 {
 		hc = out[:3]
@@ -167,11 +196,13 @@ func curl(host string, port int, path string) (string, int, string) {
 func curlErr(host string, code int, out string) string {
 	switch code {
 	case 6:
-		return "cannot resolve '" + host + "': is the container on swag's docker network and named like this?"
+		return "cannot resolve '" + host + "': a local container must be on swag's docker network with this name, a remote host must resolve from swag"
 	case 7:
 		return "connection refused by " + host
 	case 28:
 		return "timeout connecting to " + host
+	case 35:
+		return "TLS handshake with " + host + " failed (check the port and TLS setup of the remote server)"
 	}
 	return fmt.Sprintf("curl exit %d: %s", code, out)
 }
@@ -184,21 +215,21 @@ func testProv(p prov) testRes {
 	case !p.enabled():
 		r.Msg = "not enabled"
 	default:
-		host, port := p.endpoint()
-		hc, code, out := curl(host, port, p.Health)
+		sch, host, port := p.endpoint()
+		hc, code, out := curl(sch, host, port, p.Health)
 		switch {
 		case code != 0:
 			r.Msg = curlErr(host, code, out)
 		case !strings.Contains(p.Codes, hc):
-			r.Msg = fmt.Sprintf("%s:%d%s answered HTTP %s (expected %s); not counted as connected", host, port, p.Health, hc, p.Codes)
+			r.Msg = fmt.Sprintf("%s://%s:%d%s answered HTTP %s (expected %s); not counted as connected", sch, host, port, p.Health, hc, p.Codes)
 		default:
-			r.OK, r.Msg = true, fmt.Sprintf("%s:%d%s answered HTTP %s", host, port, p.Health, hc)
+			r.OK, r.Msg = true, fmt.Sprintf("%s://%s:%d%s answered HTTP %s", sch, host, port, p.Health, hc)
 		}
 		if p.Key == "ldap" && r.OK {
 			lh, lp, ok := ldapServer(readBase(p.srv()))
 			if !ok {
 				r.OK, r.Msg = false, r.Msg+"; LDAP server URL is not configured (template default)"
-			} else if _, c2, o2 := curl(lh, lp, "/"); c2 == 6 || c2 == 7 || c2 == 28 {
+			} else if _, c2, o2 := curl("http", lh, lp, "/"); c2 == 6 || c2 == 7 || c2 == 28 {
 				r.OK, r.Msg = false, "ldap-auth is up, but LDAP server: "+curlErr(lh, c2, o2)
 			} else {
 				r.Msg += fmt.Sprintf("; LDAP server %s:%d accepts TCP (bind credentials are not validated)", lh, lp)
@@ -844,8 +875,8 @@ func authTab(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(&s, "<tr><td>%s<td>-<td>not enabled<td>-<td><form method=post action=/auth/do><input type=hidden name=op value=penable><input type=hidden name=p value=%s><input type=submit value=enable></form></tr>", p.Label, p.Key)
 			continue
 		}
-		h, po := p.endpoint()
-		srv := fmt.Sprintf("http://%s:%d", h, po)
+		sh, h, po := p.endpoint()
+		srv := fmt.Sprintf("%s://%s:%d", sh, h, po)
 		if p.Key == "ldap" {
 			srv = ldapGet(readBase(p.srv()), "URL")
 		}
@@ -863,6 +894,15 @@ func authTab(w http.ResponseWriter, r *http.Request) {
 	page(w, "auth", s.String()+"</table>")
 }
 
+// scheme of the provider's own endpoint: local containers are plain http,
+// remote servers usually need https
+func schemeSel(cur string) string {
+	o := func(v string) string {
+		return "<option value=" + v + map[bool]string{true: " selected", false: ""}[v == cur] + ">" + v + "</option>"
+	}
+	return "<select name=scheme>" + o("http") + o("https") + "</select>"
+}
+
 func provPage(w http.ResponseWriter, r *http.Request) {
 	p := provBy(r.URL.Query().Get("n"))
 	if p == nil || !p.enabled() {
@@ -872,18 +912,18 @@ func provPage(w http.ResponseWriter, r *http.Request) {
 	src, use := readBase(p.srv()), provUse()[p.Key]
 	var s strings.Builder
 	fmt.Fprintf(&s, "<h3>%s</h3>status: %s<p><form method=post action=/auth/do><input type=hidden name=p value=%s><input type=hidden name=op value=ptest><input type=submit value='test connection'></form>", p.Label, provStatus(p.Key), p.Key)
-	h, po := p.endpoint()
-	fmt.Fprintf(&s, "<h4>configuration (%s)</h4><form method=post action=/auth/do><input type=hidden name=p value=%s><input type=hidden name=op value=psave>container name: <input name=host value='%s'>", e(p.srv()), p.Key, e(h))
+	sh, h, po := p.endpoint()
+	fmt.Fprintf(&s, "<h4>configuration (%s)</h4><form method=post action=/auth/do><input type=hidden name=p value=%s><input type=hidden name=op value=psave>host: <input name=host value='%s'> (container name on swag's docker network, or a remote host / IP)", e(p.srv()), p.Key, e(h))
 	if p.Key == "ldap" {
 		secret := "set"
 		if ldapGet(src, "BindPass") == "secret" {
 			secret = "template default"
 		}
-		fmt.Fprintf(&s, " (the ldap-auth container)<br>LDAP URL: <input name=url size=40 value='%s'><br>Base DN: <input name=basedn size=50 value='%s'><br>Bind DN: <input name=binddn size=50 value='%s'><br>Bind password (%s, write-only): <input type=password name=bindpass><br>Filter template (optional, e.g. (cn=%%(username)s)): <input name=tmpl size=40 value='%s'>", e(ldapGet(src, "URL")), e(ldapGet(src, "BaseDN")), e(ldapGet(src, "BindDN")), secret, e(ldapGet(src, "Template")))
+		fmt.Fprintf(&s, " (the ldap-auth service)<br>scheme: %s<br>LDAP URL: <input name=url size=40 value='%s'><br>Base DN: <input name=basedn size=50 value='%s'><br>Bind DN: <input name=binddn size=50 value='%s'><br>Bind password (%s, write-only): <input type=password name=bindpass><br>Filter template (optional, e.g. (cn=%%(username)s)): <input name=tmpl size=40 value='%s'>", schemeSel(sh), e(ldapGet(src, "URL")), e(ldapGet(src, "BaseDN")), e(ldapGet(src, "BindDN")), secret, e(ldapGet(src, "Template")))
 	} else {
-		fmt.Fprintf(&s, " port: <input name=port size=5 value='%d'>", po)
+		fmt.Fprintf(&s, " scheme: %s port: <input name=port size=5 value='%d'>", schemeSel(sh), po)
 	}
-	s.WriteString("<br><input type=submit value='save + nginx -t + reload'></form><p>The container must be on the same docker network as swag.<h4>used by</h4>")
+	s.WriteString("<br><input type=submit value='save + nginx -t + reload'></form><p>The endpoint is requested from swag itself: a container must be on swag's docker network, a remote server must be reachable from it. https is proxied with SNI and without certificate verification.<h4>used by</h4>")
 	if len(use) == 0 {
 		s.WriteString("no services<br><form method=post action=/auth/do><input type=hidden name=op value=pdisable><input type=hidden name=p value=" + p.Key + "><input type=submit value='disable provider'></form>")
 	}
@@ -1032,21 +1072,28 @@ func authDo(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		back = "/auth/p?n=" + p.Key
-		fin("provider enabled (copied from the SWAG sample)", "Now set the container name and test the connection.", true)
+		fin("provider enabled (copied from the SWAG sample)", "Now set the host (container name or remote server) and test the connection.", true)
 	case "psave":
 		p := provBy(r.FormValue("p"))
 		host, port := strings.TrimSpace(r.FormValue("host")), r.FormValue("port")
+		sch := strings.TrimSpace(r.FormValue("scheme"))
+		if sch == "" {
+			sch = "http"
+		}
 		pn, _ := strconv.Atoi(port)
-		if p == nil || !hostRe.MatchString(host) || (p.Key != "ldap" && (pn < 1 || pn > 65535)) {
+		if p == nil || !hostRe.MatchString(host) || (sch != "http" && sch != "https") || (p.Key != "ldap" && (pn < 1 || pn > 65535)) {
 			http.Error(w, "bad input", 400)
 			return
 		}
 		back = "/auth/p?n=" + p.Key
 		out, ok := changeFile(p.srv(), func(s string) (string, func(), error) {
 			v := regexp.QuoteMeta(p.Var)
+			// scheme of the upstream: http for a local container, https typical for a remote server
+			s = regexp.MustCompile(`(proxy_pass\s+)https?(://` + v + `)`).ReplaceAllString(s, "${1}"+sch+"${2}")
 			s = regexp.MustCompile(`(set\s+`+v+`\s+)[^;\s]+(\s*;)`).ReplaceAllString(s, "${1}"+host+"${2}")
 			if p.Key != "ldap" {
-				return regexp.MustCompile(`(proxy_pass\s+http://`+v+`:)\d+`).ReplaceAllString(s, "${1}"+port), nil, nil
+				s = regexp.MustCompile(`(proxy_pass\s+` + sch + `://` + v + `:)\d+`).ReplaceAllString(s, "${1}"+port)
+				return fixTLS(s, p.Var, sch), nil, nil
 			}
 			for _, f := range []struct {
 				k, f string
@@ -1060,7 +1107,7 @@ func authDo(w http.ResponseWriter, r *http.Request) {
 					s = ldapSet(s, f.k, v, f.opt)
 				}
 			}
-			return s, nil, nil
+			return fixTLS(s, p.Var, sch), nil, nil
 		})
 		fin("saved", out, ok)
 	case "setrule", "delrule":
