@@ -3,6 +3,15 @@ swag-ui is stateless. SWAG /config is the source of truth.\
 8.7 MB = All docker image (UI and Guard)\
 ![Альтернативный текст](screen/swag-ui-dashbord2.PNG)
 
+## 🌐 README translations
+
+| Language | File |
+|---|---|
+| 🇬🇧 English | [README.md](README.md) ← you are here |
+| 🇷🇺 Русский | [README_RU.md](README_RU.md) |
+
+> Want to add your language? See the [Translations](#-translations) section below.
+
 ## ✨ Features
 
 | Category             | Feature                   | Status | Description                                                                    |
