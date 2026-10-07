@@ -67,7 +67,7 @@ swag-ui is stateless. SWAG /config is the source of truth.\
 |                      | Direct SWAG integration   |    ✅   | Works directly with the existing SWAG configuration                            |
 |                      | Survives reinstallation   |    ✅   | Reinstalling the UI does not require rebuilding its state                      |
 | 📦 **Deployment**    | Docker                    |    ✅   | Designed to run as a lightweight Docker container                              |
-|                      | Lightweight image         |   🚀   | ~16 MB Docker image                                                            |
+|                      | Lightweight image         |   🚀   | ~9 MB Docker image                                                            |
 |                      | No Node.js runtime        |   🚀   | Lightweight Go-based backend and embedded UI                                   |
 |                      | No external database      |   🚀   | No PostgreSQL, MySQL or Redis required                                         |
 
