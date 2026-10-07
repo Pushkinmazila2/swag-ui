@@ -209,7 +209,7 @@ func dkPost(path string, body any) []byte {
 }
 
 func run(cmd ...string) (string, int) {
-  log.Printf("[UI-DOCKER] Initiating 'exec' command inside swag container: %v", cmd)
+	log.Printf("[UI-DOCKER] Initiating 'exec' command inside swag container: %v", cmd)
 	if dkURL == "" {
 		return "docker api off", 1
 	}
@@ -239,22 +239,7 @@ func run(cmd ...string) (string, int) {
 	return out.String(), st.ExitCode
 }
 
-func apply() (string, bool) {
-	log.Println("[UI-RELOAD] Configuration change triggered. Running 'nginx -t' validation...")
-	o, c := run("nginx", "-t")
-	ok := c == 0
-	if ok {
-		log.Println("[UI-RELOAD] 'nginx -t' passed successfully. Executing 'nginx -s reload'...")
-		o2, c2 := run("nginx", "-s", "reload")
-		o, ok = o+o2, c2 == 0
-	} else {
-		log.Println("[UI-RELOAD] CRITICAL: 'nginx -t' validation failed. Reload aborted to prevent downtime.")
-	}
-	
-	lastAt, lastOK = time.Now(), ok
-	log.Printf("[UI-RELOAD] Finished configuration application cycle. Success status: %v", ok)
-	return o, ok
-}
+func apply() (string, bool) { return applyCfg(false) }
 
 func lastApply() string {
 	if lastAt.IsZero() {
@@ -274,11 +259,8 @@ func guardMode() {
 		log.Fatal("[GUARD] Critical error: no docker socket or DOCKER_HOST found")
 	}
 	log.Printf("[GUARD] Successfully connected to backend Docker API at: %s", dkURL)
-	
 	var mu sync.Mutex
 	known := map[string]bool{}
-	cmds := map[string]bool{"nginx -t": true, "nginx -s reload": true}
-	
 	do := func(method, path string, body []byte) (int, []byte) {
 		log.Printf("[GUARD-PROXY] Forwarding request to Docker: %s %s", method, path)
 		req, _ := http.NewRequest(method, dkURL+path, bytes.NewReader(body))
@@ -293,12 +275,10 @@ func guardMode() {
 		log.Printf("[GUARD-PROXY] Docker backend responded with status: %d (bytes received: %d)", resp.StatusCode, len(b))
 		return resp.StatusCode, b
 	}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		p, code, out := r.URL.Path, 403, []byte("forbidden by swag-guard")
 		log.Printf("[GUARD-REQUEST] Incoming intercept: %s %s from %s", r.Method, p, r.RemoteAddr)
-
 		isID := func(suffix string) (string, bool) {
 			id := strings.TrimSuffix(strings.TrimPrefix(p, "/exec/"), suffix)
 			mu.Lock()
@@ -308,27 +288,21 @@ func guardMode() {
 			isKnown := known[id]
 			return id, hasPrefix && hasSuffix && isKnown
 		}
-
 		switch {
 		case r.Method == "GET" && p == "/containers/json":
 			log.Println("[GUARD-ACCESS] Route allowed: listing containers")
 			code, out = do("GET", p, nil)
-
 		case r.Method == "POST" && p == "/containers/"+swag+"/exec":
 			var q struct{ Cmd []string }
-			// Читаем тело запроса аккуратно, логируя попытки
 			bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 1024))
 			r.Body.Close()
-			
 			if json.Unmarshal(bodyBytes, &q) == nil {
 				fullCmd := strings.Join(q.Cmd, " ")
 				log.Printf("[GUARD-EXEC] Intercepted exec request for container '%s'. Command: '%s'", swag, fullCmd)
-				
-				if cmds[fullCmd] {
+				if cmdAllowed(q.Cmd) {
 					log.Printf("[GUARD-ACCESS] Command '%s' is VALID. Proxying exec creation...", fullCmd)
 					bs, _ := json.Marshal(map[string]any{"AttachStdout": true, "AttachStderr": true, "Cmd": q.Cmd})
 					code, out = do("POST", p, bs)
-					
 					var x struct{ Id string }
 					if json.Unmarshal(out, &x) == nil && x.Id != "" {
 						mu.Lock()
@@ -346,7 +320,6 @@ func guardMode() {
 				code = 400
 				out = []byte("bad request")
 			}
-
 		case r.Method == "POST":
 			if id, ok := isID("/start"); ok {
 				log.Printf("[GUARD-ACCESS] Route allowed: Starting previously approved Exec session ID: %s", id)
@@ -354,7 +327,6 @@ func guardMode() {
 			} else {
 				log.Printf("[GUARD-DENIED] Blocked unauthorized POST request or unverified Exec ID on path: %s", p)
 			}
-
 		case r.Method == "GET":
 			if id, ok := isID("/json"); ok {
 				log.Printf("[GUARD-ACCESS] Route allowed: Inspecting approved Exec session results for ID: %s", id)
@@ -362,15 +334,12 @@ func guardMode() {
 			} else {
 				log.Printf("[GUARD-DENIED] Blocked unauthorized GET request or unverified Exec ID on path: %s", p)
 			}
-			
 		default:
 			log.Printf("[GUARD-DENIED] Request method/path combination is completely unhandled: %s %s", r.Method, p)
 		}
-
 		w.WriteHeader(code)
 		w.Write(out)
 	})
-
 	log.Printf("[GUARD] Server is up and listening on port %s", env("LISTEN", ":2375"))
 	log.Fatal(http.ListenAndServe(env("LISTEN", ":2375"), mux))
 }
@@ -388,7 +357,7 @@ func page(w http.ResponseWriter, cur, body string) {
 			nav += "<a href=/" + t[0] + ">[ " + t[1] + " ]</a> "
 		}
 	}
-	fmt.Fprintf(w, "<!doctype html><meta charset=utf-8><title>swag-ui</title><tt>SWAG-UI swag=%s nginx=%s<br>%s<hr>%s</tt>", e(swag), e(base), nav, body)
+	fmt.Fprintf(w, "<!doctype html><meta charset=utf-8><title>swag-ui</title><tt>SWAG-UI swag=%s nginx=%s<br>%s<hr>%s</tt>", e(swag), e(base), nav, pendingBanner()+body)
 }
 
 func list(sub string) ([]string, error) {
@@ -440,7 +409,6 @@ func dash(w http.ResponseWriter, r *http.Request) {
 	}
 	var s strings.Builder
 	s.WriteString("<h3>services (active proxy-confs &rarr; upstream &rarr; container)</h3>" + tbl + "<tr><th>conf<th>server_name<th>upstream<th>container<th>container status<th>swag net<th>cert</tr>")
-	
 	for _, u := range ups {
 		cn, st, nt := "-", "-", "-"
 		if derr == "" {
@@ -455,18 +423,13 @@ func dash(w http.ResponseWriter, r *http.Request) {
 				prob = append(prob, "upstream "+u.App+":"+u.Port+" not matched to a container ("+u.Conf+")")
 			}
 		}
-
-		// ---- МОДЕРНИЗАЦИЯ: Разбираем хосты и делаем их кликабельными ссылками ----
 		var links []string
-		// server_name может содержать несколько доменов через пробел
 		for _, rawHost := range strings.Fields(u.Host) {
 			if rawHost == "_" {
 				links = append(links, "_")
 				continue
 			}
-
 			displayHost := rawHost
-			// Если домен заканчивается на .*, ищем реальный домен в сертификатах
 			if pre, ok := strings.CutSuffix(rawHost, ".*"); ok && len(cs) > 0 {
 				for _, c := range cs {
 					fullMatch := pre + "." + c.Name
@@ -476,15 +439,9 @@ func dash(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-
-			// Оборачиваем готовый домен в красивую HTML-ссылку
-			links = append(links, fmt.Sprintf("<a href='https://%s' target='_blank' style='text-decoration:underline; color:#0066cc;'>%s</a>", displayHost, e(displayHost)))
+			links = append(links, fmt.Sprintf("<a href='https://%s' target='_blank' style='text-decoration:underline; color:#0066cc;'>%s</a>", e(displayHost), e(displayHost)))
 		}
-		// Склеиваем ссылки обратно через пробел
 		formattedHosts := strings.Join(links, " ")
-		// -----------------------------------------------------------------------
-
-		// Выводим строку таблицы (вместо e(u.Host) теперь подставляем нашу строку formattedHosts)
 		fmt.Fprintf(&s, "<tr><td>%s<td>%s<td>%s:%s<td>%s<td>%s<td>%s<td>%s</tr>", e(u.Conf), formattedHosts, e(u.App), e(u.Port), e(cn), e(st), nt, certOf[u.Conf])
 	}
 	s.WriteString("</table>")
@@ -500,7 +457,6 @@ func dash(w http.ResponseWriter, r *http.Request) {
 	head := fmt.Sprintf("<h3>status</h3>"+tbl+"<tr><td>last nginx apply<td>%s</tr><tr><td>proxy-confs active / samples<td>%d / %d</tr><tr><td>certificates<td>%d</tr><tr><td>running containers<td>%s</tr><tr><td>problems<td>%s</tr></table>", e(lastApply()), on, off, len(cs), run, pr)
 	page(w, "", head+s.String())
 }
-
 
 func containers(w http.ResponseWriter, r *http.Request) {
 	cts, derr := loadCts()
@@ -792,7 +748,7 @@ func save(w http.ResponseWriter, r *http.Request) {
 		result(w, "FAILED, rolled back", out, bk)
 		return
 	}
-	result(w, "OK, nginx reloaded", out, bk)
+	result(w, okMsg(), out, bk)
 }
 
 func toggle(w http.ResponseWriter, r *http.Request) {
@@ -819,7 +775,7 @@ func toggle(w http.ResponseWriter, r *http.Request) {
 }
 
 func reload(w http.ResponseWriter, r *http.Request) {
-	out, ok := apply()
+	out, ok := applyCfg(true)
 	result(w, map[bool]string{true: "OK", false: "FAILED"}[ok], out, "/files")
 }
 
@@ -859,29 +815,24 @@ func main() {
 	if pass == "" {
 		log.Fatal("[UI] Критическая ошибка: Переменная окружения UI_PASS обязательна, но не задана")
 	}
-
 	log.Println("[UI] Инициализация Docker подключения для интерфейса...")
 	initDocker()
 	log.Printf("[UI] Путь к Docker API настроен как: %s", dkURL)
-
 	log.Println("[UI] Регистрация маршрутов веб-интерфейса...")
 	for p, h := range map[string]http.HandlerFunc{
-		"/":            dash,
-		"/containers":  containers,
-		"/confs":       confs,
-		"/files":       files,
-		"/certs":       certsTab,
-		"/new":         newf,
-		"/edit":        edit,
-		"/save":        save,
-		"/toggle":      toggle,
-		"/reload":      reload,
+		"/":           dash,
+		"/containers": containers,
+		"/confs":      confs,
+		"/files":      files,
+		"/certs":      certsTab,
+		"/new":        newf,
+		"/edit":       edit,
+		"/save":       save,
+		"/toggle":     toggle,
+		"/reload":     reload,
 	} {
-		// Используем стандартный http.HandleFunc, так как в режиме UI 
-		// нам не нужно изолировать роутер от самого себя
 		http.HandleFunc(p, guard(h))
 	}
-
 	log.Println("[UI] Веб-интерфейс успешно запущен и готов к приему соединений.")
 	log.Fatal(http.ListenAndServe(env("LISTEN", ":8080"), nil))
 }
