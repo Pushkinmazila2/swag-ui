@@ -78,7 +78,7 @@ swag-ui is stateless. SWAG /config is the source of truth.\
 * **Docker-first** — designed for containerized SWAG deployments.
 * **Safe changes** — configuration is validated with `nginx -t` before reload.
 * **Security by default** — Docker access is isolated through a restricted API boundary.
-* **Small footprint** — approximately **16 MB** Docker image.
+* **Small footprint** — approximately **9 MB** Docker image.
 * **Simple recovery** — remove and reinstall `swag-ui`, and it can rediscover the existing SWAG state.
 * **Advanced users are not locked in** — raw configuration and generic DNS-provider support remain available.
 
