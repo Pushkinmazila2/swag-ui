@@ -1,3 +1,11 @@
+
+## 🌐 README translations
+
+| Language | File |
+|---|---|
+| 🇬🇧 English | [README.md](README.md)  |
+| 🇷🇺 Русский | [README_RU.md](README_RU.md) ← you are here |
+
 ## ✨ Функциональность
 
 | Категория                          | Функция                            | Статус | Описание                                                                                   |
