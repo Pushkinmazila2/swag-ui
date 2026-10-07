@@ -64,8 +64,8 @@ func init() {
 
 var okCmd = []*regexp.Regexp{
 	regexp.MustCompile(`^nginx (-t|-V|-s reload)$`),
-	regexp.MustCompile(`^fail2ban-client status( [A-Za-z0-9_-]{1,40})?$`),
-	regexp.MustCompile(`^fail2ban-client set [A-Za-z0-9_-]{1,40} (banip|unbanip) [0-9A-Fa-f:.]{2,45}$`),
+	regexp.MustCompile(`^fail2ban-client status( [A-Za-z0-9_][A-Za-z0-9_-]{0,39})?$`),
+	regexp.MustCompile(`^fail2ban-client set [A-Za-z0-9_][A-Za-z0-9_-]{0,39} (banip|unbanip) [0-9A-Fa-f:.]{2,45}$`),
 }
 
 func cmdAllowed(c []string) bool {
@@ -178,7 +178,7 @@ func arDo(w http.ResponseWriter, r *http.Request) {
 
 // ---------------- fail2ban ----------------
 
-var jailRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`)
+var jailRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]{0,39}$`)
 
 func f2bField(s, label string) string {
 	m := regexp.MustCompile(label + `:[ \t]*(.*)`).FindStringSubmatch(s)
