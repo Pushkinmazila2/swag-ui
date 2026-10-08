@@ -45,6 +45,8 @@ var (
 	portRe = regexp.MustCompile(`(?m)^\s*set\s+\$upstream_port\s+"?([^";\s]+)"?\s*;`)
 	hc     = &http.Client{Timeout: 4 * time.Second}
 	dkURL  string
+	lockMu sync.Mutex
+	locked bool
 )
 
 // ---- docker (optional, read-only: DOCKER_HOST=tcp://proxy:2375 or DOCKER_SOCK) ----
@@ -357,6 +359,7 @@ func page(w http.ResponseWriter, cur, body string) {
 			nav += "<a href=/" + t[0] + ">[ " + t[1] + " ]</a> "
 		}
 	}
+	nav += "<form method=post action=/lock style='display:inline'><input type=submit value='lock panel'></form>"
 	fmt.Fprintf(w, "<!doctype html><meta charset=utf-8><title>swag-ui</title><tt>SWAG-UI swag=%s nginx=%s<br>%s<hr>%s</tt>", e(swag), e(base), nav, pendingBanner()+body)
 }
 
@@ -779,6 +782,42 @@ func reload(w http.ResponseWriter, r *http.Request) {
 	result(w, map[bool]string{true: "OK", false: "FAILED"}[ok], out, "/files")
 }
 
+// ---- panel lock (logout) ----
+// Basic-auth credentials live in the browser and cannot be revoked by the server,
+// so "lock" flips a server-side flag: every page is replaced by the lock screen
+// until the panel password is entered again.
+
+func isLocked() bool { lockMu.Lock(); defer lockMu.Unlock(); return locked }
+
+func setLocked(v bool) { lockMu.Lock(); locked = v; lockMu.Unlock() }
+
+func lockPage(w http.ResponseWriter, wrong bool) {
+	msg := ""
+	if wrong {
+		msg = "<b>wrong password</b><br>"
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	fmt.Fprintf(w, "<!doctype html><meta charset=utf-8><title>swag-ui locked</title><tt><h3>swag-ui locked</h3>%spanel is locked, enter the password to continue:<form method=post action=/unlock>password: <input type=password name=password autofocus> <input type=submit value=unlock></form></tt>", msg)
+}
+
+func lockDo(w http.ResponseWriter, r *http.Request) {
+	setLocked(true)
+	lockPage(w, false)
+}
+
+func unlockDo(w http.ResponseWriter, r *http.Request) {
+	if !isLocked() {
+		http.Redirect(w, r, "/", 303)
+		return
+	}
+	if r.Method == "POST" && subtle.ConstantTimeCompare([]byte(r.FormValue("password")), []byte(pass)) == 1 {
+		setLocked(false)
+		http.Redirect(w, r, "/", 303)
+		return
+	}
+	lockPage(w, r.Method == "POST")
+}
+
 func guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
@@ -794,6 +833,10 @@ func guard(h http.HandlerFunc) http.HandlerFunc {
 					return
 				}
 			}
+		}
+		if isLocked() && r.URL.Path != "/unlock" {
+			lockPage(w, false)
+			return
 		}
 		h(w, r)
 	}
@@ -858,6 +901,8 @@ func main() {
 		"/save":       save,
 		"/toggle":     toggle,
 		"/reload":     reload,
+		"/lock":       lockDo,
+		"/unlock":     unlockDo,
 	} {
 		http.HandleFunc(p, guard(h))
 	}

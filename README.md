@@ -47,7 +47,9 @@ swag-ui is stateless. SWAG /config is the source of truth.\
 |                      | Staging certificates      |    ✅   | Test certificate issuance without hitting production ACME limits               |
 | 🛡️ **Security**     | Fail2ban                  |    ✅   | View and manage SWAG Fail2ban status and jails                                 |
 |                      | Ban / unban IP            |    ✅   | Manage blocked addresses from the web UI                                       |
+|                      | Fail2ban whitelist        |    ✅   | Add or remove ignored IPs/networks (ignoreip) per jail                         |
 |                      | Basic authentication      |    ✅   | Create and manage `.htpasswd` credentials                                      |
+|                      | Panel lock (logout)       |    ✅   | Lock the panel and require the password again to continue                      |
 |                      | Restricted Docker API     |    ✅   | Docker operations are isolated behind `swag-guard`                             |
 |                      | Command allowlist         |    ✅   | Only explicitly permitted SWAG commands can be executed                        |
 | 📜 **Logs**          | Access logs               |    ✅   | View Nginx access logs from the web UI                                         |

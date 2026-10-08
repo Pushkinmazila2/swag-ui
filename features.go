@@ -66,6 +66,8 @@ var okCmd = []*regexp.Regexp{
 	regexp.MustCompile(`^nginx (-t|-V|-s reload)$`),
 	regexp.MustCompile(`^fail2ban-client status( [A-Za-z0-9_][A-Za-z0-9_-]{0,39})?$`),
 	regexp.MustCompile(`^fail2ban-client set [A-Za-z0-9_][A-Za-z0-9_-]{0,39} (banip|unbanip) [0-9A-Fa-f:.]{2,45}$`),
+	regexp.MustCompile(`^fail2ban-client get [A-Za-z0-9_][A-Za-z0-9_-]{0,39} ignoreip$`),
+	regexp.MustCompile(`^fail2ban-client set [A-Za-z0-9_][A-Za-z0-9_-]{0,39} (addignoreip|delignoreip) [0-9A-Fa-f:.]{2,45}(/[0-9]{1,3})?$`),
 }
 
 func cmdAllowed(c []string) bool {
@@ -188,6 +190,35 @@ func f2bField(s, label string) string {
 	return strings.TrimSpace(m[1])
 }
 
+func f2bIgnore(out string) (r []string) {
+	for _, l := range strings.Split(out, "\n") {
+		// "These IP addresses/networks are ignored:" / "|- ip" / "`- ip" lines
+		l = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(l), "|-"), "`-"))
+		for _, f := range strings.Fields(l) {
+			if net.ParseIP(f) != nil {
+				r = append(r, f)
+				continue
+			}
+			if _, _, err := net.ParseCIDR(f); err == nil {
+				r = append(r, f)
+			}
+		}
+	}
+	return
+}
+
+// ban/unban take a single IP, the whitelist (ignoreip) also takes a CIDR network
+func f2bAddrOK(op, s string) bool {
+	if net.ParseIP(s) != nil {
+		return true
+	}
+	if op == "addignoreip" || op == "delignoreip" {
+		_, _, err := net.ParseCIDR(s)
+		return err == nil
+	}
+	return false
+}
+
 func f2bTab(w http.ResponseWriter, r *http.Request) {
 	out, code := run("fail2ban-client", "status")
 	if code != 0 {
@@ -200,8 +231,9 @@ func f2bTab(w http.ResponseWriter, r *http.Request) {
 			jails = append(jails, j)
 		}
 	}
-	var s, opt strings.Builder
+	var s, opt, wl strings.Builder
 	s.WriteString(tbl + "<tr><th>jail<th>failed<th>banned<th>total<th>banned IPs</tr>")
+	wl.WriteString(tbl + "<tr><th>jail<th>never banned IPs / networks</tr>")
 	for _, j := range jails {
 		o, _ := run("fail2ban-client", "status", j)
 		var ips strings.Builder
@@ -210,14 +242,26 @@ func f2bTab(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(&s, "<tr><td>%s<td>%s<td>%s<td>%s<td>%s</tr>", e(j), e(f2bField(o, "Currently failed")), e(f2bField(o, "Currently banned")), e(f2bField(o, "Total banned")), ips.String())
 		fmt.Fprintf(&opt, "<option>%s</option>", e(j))
+		g, _ := run("fail2ban-client", "get", j, "ignoreip")
+		var allow strings.Builder
+		for _, ip := range f2bIgnore(g) {
+			fmt.Fprintf(&allow, "<form method=post action=/f2b/do>%s <input type=hidden name=jail value='%s'><input type=hidden name=ip value='%s'><input type=hidden name=op value=delignoreip><input type=submit value=remove></form> ", e(ip), e(j), e(ip))
+		}
+		if allow.Len() == 0 {
+			allow.WriteString("-")
+		}
+		fmt.Fprintf(&wl, "<tr><td>%s<td>%s</tr>", e(j), allow.String())
 	}
 	s.WriteString("</table><h3>ban manually</h3><form method=post action=/f2b/do><input type=hidden name=op value=banip><select name=jail>" + opt.String() + "</select> IP: <input name=ip size=40> <input type=submit value=ban></form>")
+	wl.WriteString("</table><h3>whitelist (ignoreip)</h3>IPs / networks that are never banned by the selected jail.<form method=post action=/f2b/do><input type=hidden name=op value=addignoreip><select name=jail>" + opt.String() + "</select> IP or CIDR: <input name=ip size=40> <input type=submit value='add to whitelist'></form>")
+	wl.WriteString("<small>applied to the running jail immediately; like ban/unban it is lost when fail2ban restarts &mdash; to keep it, set the same value in the jail's <tt>ignoreip</tt> option of the fail2ban config.</small>")
+	s.WriteString(wl.String())
 	page(w, "f2b", s.String())
 }
 
 func f2bDo(w http.ResponseWriter, r *http.Request) {
 	jail, ip, op := r.FormValue("jail"), strings.TrimSpace(r.FormValue("ip")), r.FormValue("op")
-	if !jailRe.MatchString(jail) || net.ParseIP(ip) == nil || (op != "banip" && op != "unbanip") {
+	if !jailRe.MatchString(jail) || (op != "banip" && op != "unbanip" && op != "addignoreip" && op != "delignoreip") || !f2bAddrOK(op, ip) {
 		http.Error(w, "bad input", 400)
 		return
 	}
