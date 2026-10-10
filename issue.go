@@ -99,8 +99,21 @@ const common = `<br>email (Let's Encrypt notices): <input name=email size=30><br
 func issueTab(w http.ResponseWriter, r *http.Request) {
 	const plugins = "aliyun azure cloudflare cpanel desec digitalocean dnsimple dnsmadeeasy dnspod domeneshop dynu gandi gehirn godaddy google he hetzner infomaniak inwx ionos linode loopia luadns namecheap netcup njalla nsone ovh porkbun rfc2136 sakuracloud transip vultr"
 	var dl strings.Builder
-	for _, p := range strings.Fields(plugins) {
+	for _, p := range dnsProviders(strings.Fields(plugins)) {
 		dl.WriteString("<option value=" + p + ">")
+	}
+	pl := strings.ToLower(r.URL.Query().Get("pl"))
+	if !plugRe.MatchString(pl) {
+		pl = ""
+	}
+	cv, sec := dnsView(pl)
+	note := ""
+	if pl != "" {
+		note = "<br>file dns-conf/" + e(pl) + ".ini shown with its # comments."
+		if len(sec) > 0 {
+			note += " Secret values already saved for: " + e(strings.Join(sec, ", ")) + " (leave empty to keep)."
+		}
+		note += " Uncomment a line and fill in the value."
 	}
 	jobLink := ""
 	if curJob != nil {
@@ -133,11 +146,12 @@ domain (apex, e.g. example.com): <input name=domain size=30><br>
 API token: <input type=password name=token size=60> %s`+common+`
 <hr>
 <h3>Other providers</h3>
-Provider is the SWAG DNSPLUGIN name. Credentials are written to <tt>/config/dns-conf/&lt;provider&gt;.ini</tt> (SWAG ships a sample file there with the exact keys for each provider, use it as the template). Route53 is not supported by this form.
+Provider is the SWAG DNSPLUGIN name. Credentials are written to <tt>/config/dns-conf/&lt;provider&gt;.ini</tt> (SWAG ships a sample file there with the exact keys for each provider, use it as the template). Route53 is not supported by this form. <a href=/dns>[ edit dns-conf files ]</a>
+<form method=get action=/issue>choose provider: <select name=pl>%s</select> <input type=submit value="show its config file"></form>
 <form method=post action=/issue/do><input type=hidden name=kind value=other>
-provider: <input name=plugin list=plugins size=20><datalist id=plugins>%s</datalist><br>
+provider: <input name=plugin list=plugins size=20 value='%s'><datalist id=plugins>%s</datalist><br>
 domains (space or comma, up to 4, e.g. <tt>example.com *.example.com</tt>): <input name=domains size=50><br>
-credentials (ini content): <br><textarea name=cred rows=6 cols=70 spellcheck=false placeholder="dns_ovh_endpoint = ovh-eu"></textarea>`+common, saved("duckdns", hasDuck), 60, saved("cloudflare", hasCF), 30, dl.String(), 60))
+credentials (ini content): <br><textarea name=cred rows=6 cols=70 spellcheck=false placeholder="dns_ovh_endpoint = ovh-eu">%s</textarea>%s`+common, saved("duckdns", hasDuck), 60, saved("cloudflare", hasCF), 30, dl.String(), e(pl), dl.String(), e(cv), note, 60))
 }
 
 type job struct {
@@ -191,11 +205,7 @@ func issueDo(w http.ResponseWriter, r *http.Request) {
 		}
 		d := sub + ".duckdns.org"
 		q.Plugin, q.Domains = "duckdns", []string{d, "*." + d}
-		c := ""
-		if tok != "" {
-			c = "dns_duckdns_token = " + tok + "\n"
-		}
-		err = saveCred("duckdns", c, hasDuck)
+		err = saveKey("duckdns", "dns_duckdns_token", tok, hasDuck)
 	case "cloudflare":
 		if !domRe.MatchString(dom) || strings.HasPrefix(dom, "*") || (tok != "" && !tokCF.MatchString(tok)) {
 			fail("invalid domain or token")
@@ -205,11 +215,7 @@ func issueDo(w http.ResponseWriter, r *http.Request) {
 		if r.FormValue("wildcard") == "1" {
 			q.Domains = append(q.Domains, "*."+dom)
 		}
-		c := ""
-		if tok != "" {
-			c = "dns_cloudflare_api_token = " + tok + "\n"
-		}
-		err = saveCred("cloudflare", c, hasCF)
+		err = saveKey("cloudflare", "dns_cloudflare_api_token", tok, hasCF)
 	case "other":
 		q.Plugin = strings.ToLower(strings.TrimSpace(r.FormValue("plugin")))
 		for _, d := range strings.FieldsFunc(strings.ToLower(r.FormValue("domains")), func(c rune) bool { return c == ' ' || c == ',' || c == '\n' || c == '\t' }) {
@@ -227,7 +233,7 @@ func issueDo(w http.ResponseWriter, r *http.Request) {
 		if c != "" {
 			c += "\n"
 		}
-		err = saveCred(q.Plugin, c, hasAny)
+		err = saveWhole(q.Plugin, c, hasAny)
 	default:
 		fail("unknown form")
 		return

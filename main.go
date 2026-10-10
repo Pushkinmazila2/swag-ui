@@ -45,8 +45,6 @@ var (
 	portRe = regexp.MustCompile(`(?m)^\s*set\s+\$upstream_port\s+"?([^";\s]+)"?\s*;`)
 	hc     = &http.Client{Timeout: 4 * time.Second}
 	dkURL  string
-	lockMu sync.Mutex
-	locked bool
 )
 
 // ---- docker (optional, read-only: DOCKER_HOST=tcp://proxy:2375 or DOCKER_SOCK) ----
@@ -348,7 +346,7 @@ func guardMode() {
 
 // ---- html ----
 
-var tabs = [][2]string{{"", "dashboard"}, {"containers", "docker ps"}, {"confs", "proxy-confs"}, {"files", "nginx files"}, {"certs", "certs/domains"}}
+var tabs = [][2]string{{"", "dashboard"}, {"containers", "docker ps"}, {"confs", "proxy-confs"}, {"files", "nginx files"}, {"certs", "ACME / certs"}}
 
 func page(w http.ResponseWriter, cur, body string) {
 	nav := ""
@@ -359,7 +357,6 @@ func page(w http.ResponseWriter, cur, body string) {
 			nav += "<a href=/" + t[0] + ">[ " + t[1] + " ]</a> "
 		}
 	}
-	nav += "<form method=post action=/lock style='display:inline'><input type=submit value='lock panel'></form>"
 	fmt.Fprintf(w, "<!doctype html><meta charset=utf-8><title>swag-ui</title><tt>SWAG-UI swag=%s nginx=%s<br>%s<hr>%s</tt>", e(swag), e(base), nav, pendingBanner()+body)
 }
 
@@ -411,7 +408,7 @@ func dash(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var s strings.Builder
-	s.WriteString("<h3>services (active proxy-confs &rarr; upstream &rarr; container)</h3>" + tbl + "<tr><th>conf<th>server_name<th>upstream<th>container<th>container status<th>swag net<th>cert</tr>")
+	s.WriteString("<h3>services (active proxy-confs &rarr; upstream &rarr; container)</h3>" + tbl + "<tr><th>conf<th>server_name<th>upstream<th>container<th>container status<th>swag net<th>cert<th>auth</tr>")
 	for _, u := range ups {
 		cn, st, nt := "-", "-", "-"
 		if derr == "" {
@@ -445,7 +442,7 @@ func dash(w http.ResponseWriter, r *http.Request) {
 			links = append(links, fmt.Sprintf("<a href='https://%s' target='_blank' style='text-decoration:underline; color:#0066cc;'>%s</a>", e(displayHost), e(displayHost)))
 		}
 		formattedHosts := strings.Join(links, " ")
-		fmt.Fprintf(&s, "<tr><td>%s<td>%s<td>%s:%s<td>%s<td>%s<td>%s<td>%s</tr>", e(u.Conf), formattedHosts, e(u.App), e(u.Port), e(cn), e(st), nt, certOf[u.Conf])
+		fmt.Fprintf(&s, "<tr><td>%s<td>%s<td>%s:%s<td>%s<td>%s<td>%s<td>%s<td>%s</tr>", e(u.Conf), formattedHosts, e(u.App), e(u.Port), e(cn), e(st), nt, certOf[u.Conf], authCell(u.Conf))
 	}
 	s.WriteString("</table>")
 	pr := "none"
@@ -458,7 +455,7 @@ func dash(w http.ResponseWriter, r *http.Request) {
 		run = fmt.Sprint(len(cts))
 	}
 	head := fmt.Sprintf("<h3>status</h3>"+tbl+"<tr><td>last nginx apply<td>%s</tr><tr><td>proxy-confs active / samples<td>%d / %d</tr><tr><td>certificates<td>%d</tr><tr><td>running containers<td>%s</tr><tr><td>problems<td>%s</tr></table>", e(lastApply()), on, off, len(cs), run, pr)
-	page(w, "", head+s.String())
+	page(w, "", head+authDash()+s.String())
 }
 
 func containers(w http.ResponseWriter, r *http.Request) {
@@ -640,24 +637,6 @@ func hostRows(cs []cert) (r []hostRow) {
 	return
 }
 
-func certsTab(w http.ResponseWriter, r *http.Request) {
-	cs, err := loadCerts()
-	var s strings.Builder
-	if err != nil {
-		s.WriteString("<b>ERROR " + e(le) + ": " + e(err.Error()) + "</b>")
-	}
-	s.WriteString("<h3>certificates</h3>" + tbl + "<tr><th>name<th>SAN<th>issuer<th>expires<th>days<th>status</tr>")
-	for _, c := range cs {
-		fmt.Fprintf(&s, "<tr><td>%s<td>%s<td>%s<td>%s<td>%d<td>%s</tr>", e(c.Name), e(strings.Join(c.SANs, " ")), e(c.Issuer), c.NotAfter.Format("2006-01-02"), c.days(), c.status())
-	}
-	s.WriteString("</table><h3>hosts from active proxy-confs</h3>" + tbl + "<tr><th>conf<th>host<th>cert<th>days<th>status</tr>")
-	for _, h := range hostRows(cs) {
-		fmt.Fprintf(&s, "<tr><td>%s<td>%s<td>%s<td>%s<td>%s</tr>", e(h.Conf), e(h.Host), e(h.Cert), h.Days, h.Status)
-	}
-	s.WriteString("</table>")
-	page(w, "certs", s.String())
-}
-
 // ---- edit ----
 
 const tpl = `server {
@@ -782,42 +761,6 @@ func reload(w http.ResponseWriter, r *http.Request) {
 	result(w, map[bool]string{true: "OK", false: "FAILED"}[ok], out, "/files")
 }
 
-// ---- panel lock (logout) ----
-// Basic-auth credentials live in the browser and cannot be revoked by the server,
-// so "lock" flips a server-side flag: every page is replaced by the lock screen
-// until the panel password is entered again.
-
-func isLocked() bool { lockMu.Lock(); defer lockMu.Unlock(); return locked }
-
-func setLocked(v bool) { lockMu.Lock(); locked = v; lockMu.Unlock() }
-
-func lockPage(w http.ResponseWriter, wrong bool) {
-	msg := ""
-	if wrong {
-		msg = "<b>wrong password</b><br>"
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprintf(w, "<!doctype html><meta charset=utf-8><title>swag-ui locked</title><tt><h3>swag-ui locked</h3>%spanel is locked, enter the password to continue:<form method=post action=/unlock>password: <input type=password name=password autofocus> <input type=submit value=unlock></form></tt>", msg)
-}
-
-func lockDo(w http.ResponseWriter, r *http.Request) {
-	setLocked(true)
-	lockPage(w, false)
-}
-
-func unlockDo(w http.ResponseWriter, r *http.Request) {
-	if !isLocked() {
-		http.Redirect(w, r, "/", 303)
-		return
-	}
-	if r.Method == "POST" && subtle.ConstantTimeCompare([]byte(r.FormValue("password")), []byte(pass)) == 1 {
-		setLocked(false)
-		http.Redirect(w, r, "/", 303)
-		return
-	}
-	lockPage(w, r.Method == "POST")
-}
-
 func guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
@@ -834,43 +777,11 @@ func guard(h http.HandlerFunc) http.HandlerFunc {
 				}
 			}
 		}
-		if isLocked() && r.URL.Path != "/unlock" {
-			lockPage(w, false)
-			return
-		}
 		h(w, r)
 	}
 }
 
 func main() {
-	// 0. РЕЖИМ HEALTHCHECK (для Docker Healthcheck)
-	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
-		// Читаем LISTEN. Если пусто (как в режиме UI), берем дефолтный порт интерфейса :8080
-		addr := os.Getenv("LISTEN")
-		if addr == "" {
-			addr = ":8080"
-		}
-
-		// Если адрес указан как "0.0.0.0:2375", net.Dial может не сработать локально на некоторых системах.
-		// Поэтому заменяем хост на 127.0.0.1 для внутренней проверки безопасности.
-		if strings.Contains(addr, ":") {
-			parts := strings.Split(addr, ":")
-			port := parts[len(parts)-1]
-			addr = "127.0.0.1:" + port
-		} else {
-			// На случай, если в LISTEN передали чистый порт вроде "8080"
-			addr = "127.0.0.1:" + addr
-		}
-
-		// Проверяем доступность TCP-порта приложения
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err != nil {
-			// Контейнер не слушает порт — сигнализируем Docker об ошибке
-			os.Exit(1)
-		}
-		conn.Close()
-		os.Exit(0)
-	}
 	// 1. РЕЖИМ ПРОКСИ (swag-guard)
 	if len(os.Args) > 1 && os.Args[1] == "guard" {
 		log.Printf("[GUARD] Инициализация Docker подключения для прокси-сервера...")
@@ -901,8 +812,6 @@ func main() {
 		"/save":       save,
 		"/toggle":     toggle,
 		"/reload":     reload,
-		"/lock":       lockDo,
-		"/unlock":     unlockDo,
 	} {
 		http.HandleFunc(p, guard(h))
 	}

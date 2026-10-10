@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-var featureTabs = [][2]string{{"f2b", "fail2ban"}, {"logs", "logs"}, {"h3", "http/3"}, {"htpasswd", ".htpasswd"}, {"autoreload", "auto reload"}}
+var featureTabs = [][2]string{{"f2b", "fail2ban"}, {"logs", "logs"}, {"h3", "protocols"}, {"htpasswd", ".htpasswd"}, {"autoreload", "auto reload"}}
 
 var featureRoutes = map[string]http.HandlerFunc{
 	"/f2b": f2bTab, "/f2b/do": f2bDo, "/logs": logsTab, "/h3": h3Tab, "/h3/do": h3Do,
@@ -66,8 +66,6 @@ var okCmd = []*regexp.Regexp{
 	regexp.MustCompile(`^nginx (-t|-V|-s reload)$`),
 	regexp.MustCompile(`^fail2ban-client status( [A-Za-z0-9_][A-Za-z0-9_-]{0,39})?$`),
 	regexp.MustCompile(`^fail2ban-client set [A-Za-z0-9_][A-Za-z0-9_-]{0,39} (banip|unbanip) [0-9A-Fa-f:.]{2,45}$`),
-	regexp.MustCompile(`^fail2ban-client get [A-Za-z0-9_][A-Za-z0-9_-]{0,39} ignoreip$`),
-	regexp.MustCompile(`^fail2ban-client set [A-Za-z0-9_][A-Za-z0-9_-]{0,39} (addignoreip|delignoreip) [0-9A-Fa-f:.]{2,45}(/[0-9]{1,3})?$`),
 }
 
 func cmdAllowed(c []string) bool {
@@ -190,35 +188,6 @@ func f2bField(s, label string) string {
 	return strings.TrimSpace(m[1])
 }
 
-func f2bIgnore(out string) (r []string) {
-	for _, l := range strings.Split(out, "\n") {
-		// "These IP addresses/networks are ignored:" / "|- ip" / "`- ip" lines
-		l = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(l), "|-"), "`-"))
-		for _, f := range strings.Fields(l) {
-			if net.ParseIP(f) != nil {
-				r = append(r, f)
-				continue
-			}
-			if _, _, err := net.ParseCIDR(f); err == nil {
-				r = append(r, f)
-			}
-		}
-	}
-	return
-}
-
-// ban/unban take a single IP, the whitelist (ignoreip) also takes a CIDR network
-func f2bAddrOK(op, s string) bool {
-	if net.ParseIP(s) != nil {
-		return true
-	}
-	if op == "addignoreip" || op == "delignoreip" {
-		_, _, err := net.ParseCIDR(s)
-		return err == nil
-	}
-	return false
-}
-
 func f2bTab(w http.ResponseWriter, r *http.Request) {
 	out, code := run("fail2ban-client", "status")
 	if code != 0 {
@@ -231,9 +200,8 @@ func f2bTab(w http.ResponseWriter, r *http.Request) {
 			jails = append(jails, j)
 		}
 	}
-	var s, opt, wl strings.Builder
+	var s, opt strings.Builder
 	s.WriteString(tbl + "<tr><th>jail<th>failed<th>banned<th>total<th>banned IPs</tr>")
-	wl.WriteString(tbl + "<tr><th>jail<th>never banned IPs / networks</tr>")
 	for _, j := range jails {
 		o, _ := run("fail2ban-client", "status", j)
 		var ips strings.Builder
@@ -242,26 +210,14 @@ func f2bTab(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(&s, "<tr><td>%s<td>%s<td>%s<td>%s<td>%s</tr>", e(j), e(f2bField(o, "Currently failed")), e(f2bField(o, "Currently banned")), e(f2bField(o, "Total banned")), ips.String())
 		fmt.Fprintf(&opt, "<option>%s</option>", e(j))
-		g, _ := run("fail2ban-client", "get", j, "ignoreip")
-		var allow strings.Builder
-		for _, ip := range f2bIgnore(g) {
-			fmt.Fprintf(&allow, "<form method=post action=/f2b/do>%s <input type=hidden name=jail value='%s'><input type=hidden name=ip value='%s'><input type=hidden name=op value=delignoreip><input type=submit value=remove></form> ", e(ip), e(j), e(ip))
-		}
-		if allow.Len() == 0 {
-			allow.WriteString("-")
-		}
-		fmt.Fprintf(&wl, "<tr><td>%s<td>%s</tr>", e(j), allow.String())
 	}
 	s.WriteString("</table><h3>ban manually</h3><form method=post action=/f2b/do><input type=hidden name=op value=banip><select name=jail>" + opt.String() + "</select> IP: <input name=ip size=40> <input type=submit value=ban></form>")
-	wl.WriteString("</table><h3>whitelist (ignoreip)</h3>IPs / networks that are never banned by the selected jail.<form method=post action=/f2b/do><input type=hidden name=op value=addignoreip><select name=jail>" + opt.String() + "</select> IP or CIDR: <input name=ip size=40> <input type=submit value='add to whitelist'></form>")
-	wl.WriteString("<small>applied to the running jail immediately; like ban/unban it is lost when fail2ban restarts &mdash; to keep it, set the same value in the jail's <tt>ignoreip</tt> option of the fail2ban config.</small>")
-	s.WriteString(wl.String())
 	page(w, "f2b", s.String())
 }
 
 func f2bDo(w http.ResponseWriter, r *http.Request) {
 	jail, ip, op := r.FormValue("jail"), strings.TrimSpace(r.FormValue("ip")), r.FormValue("op")
-	if !jailRe.MatchString(jail) || (op != "banip" && op != "unbanip" && op != "addignoreip" && op != "delignoreip") || !f2bAddrOK(op, ip) {
+	if !jailRe.MatchString(jail) || net.ParseIP(ip) == nil || (op != "banip" && op != "unbanip") {
 		http.Error(w, "bad input", 400)
 		return
 	}
@@ -439,89 +395,6 @@ func h3Files() []string {
 	return r
 }
 
-func h3Tab(w http.ResponseWriter, r *http.Request) {
-	v, _ := run("nginx", "-V")
-	udp := "unknown (docker api off)"
-	if cts, derr := loadCts(); derr == "" {
-		udp = "NO: publish 443:443/udp on the swag container"
-		for _, c := range cts {
-			if c.name() == swag {
-				for _, p := range c.Ports {
-					if p.Type == "udp" && p.PrivatePort == 443 {
-						udp = "yes"
-					}
-				}
-			}
-		}
-	}
-	var s strings.Builder
-	fmt.Fprintf(&s, tbl+"<tr><td>nginx http_v3_module<td>%v</tr><tr><td>UDP 443 published<td>%s</tr></table><p>"+tbl+"<tr><th>file<th>http/3<th>action</tr>", strings.Contains(v, "http_v3_module"), e(udp))
-	for _, n := range h3Files() {
-		st := "missing"
-		if b, err := os.ReadFile(filepath.Join(base, n)); err == nil {
-			switch c := string(b); {
-			case strings.Contains(c, h3Tag):
-				st = "ON (swag-ui)"
-			case quicRe.MatchString(c):
-				st = "ON (manual)"
-			case sslListen.MatchString(c):
-				st = "off"
-			default:
-				st = "n/a (no 443 ssl listen)"
-			}
-		}
-		btn := ""
-		if st == "off" || st == "ON (swag-ui)" {
-			op := map[bool]string{true: "off", false: "on"}[st != "off"]
-			btn = fmt.Sprintf("<form method=post action=/h3/do><input type=hidden name=f value='%s'><input type=hidden name=op value=%s><input type=submit value=%s></form>", e(n), op, op)
-		}
-		fmt.Fprintf(&s, "<tr><td>%s<td>%s<td>%s</tr>", e(n), st, btn)
-	}
-	s.WriteString("</table><form method=post action=/h3/do><input type=hidden name=f value='*'><input type=submit name=op value=on> <input type=submit name=op value=off> all files</form>")
-	page(w, "h3", s.String())
-}
-
-func h3Do(w http.ResponseWriter, r *http.Request) {
-	op, f := r.FormValue("op"), r.FormValue("f")
-	files := h3Files()
-	if f != "*" {
-		if !has(files, f) {
-			http.Error(w, "bad file", 400)
-			return
-		}
-		files = []string{f}
-	}
-	old := map[string][]byte{}
-	for _, n := range files {
-		p := filepath.Join(base, n)
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		ns := h3Off(string(b))
-		if op == "on" {
-			ns = h3On(string(b))
-		}
-		if ns != string(b) {
-			old[n] = b
-			os.WriteFile(p, []byte(ns), 0644)
-		}
-	}
-	if len(old) == 0 {
-		result(w, "nothing to change", "", "/h3")
-		return
-	}
-	out, ok := apply()
-	if !ok {
-		for n, b := range old {
-			os.WriteFile(filepath.Join(base, n), b, 0644)
-		}
-		result(w, "FAILED, rolled back", out, "/h3")
-		return
-	}
-	result(w, fmt.Sprintf("OK: %d file(s) changed", len(old)), out, "/h3")
-}
-
 // ---------------- .htpasswd (apr1-md5, no dependencies) ----------------
 
 const a64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -598,10 +471,11 @@ func htLines() (r []string) {
 
 func htTab(w http.ResponseWriter, r *http.Request) {
 	var s strings.Builder
-	fmt.Fprintf(&s, "file: %s<p>"+tbl+"<tr><th>user<th>action</tr>", e(htPath))
+	fmt.Fprintf(&s, "file: %s<p>"+tbl+"<tr><th>user<th>used in<th>action</tr>", e(htPath))
+	use := htUsage()
 	for _, l := range htLines() {
 		u, _, _ := strings.Cut(l, ":")
-		fmt.Fprintf(&s, "<tr><td>%s<td><form method=post action=/htpasswd/do><input type=hidden name=op value=del><input type=hidden name=user value='%s'><input type=submit value=delete></form></tr>", e(u), e(u))
+		fmt.Fprintf(&s, "<tr><td>%s<td>%s<td><form method=post action=/htpasswd/do><input type=hidden name=op value=del><input type=hidden name=user value='%s'><input type=submit value=delete></form></tr>", e(u), usedIn(use[u]), e(u))
 	}
 	s.WriteString("</table><h3>add / change password</h3><form method=post action=/htpasswd/do><input type=hidden name=op value=add>user: <input name=user> password: <input type=password name=password> <input type=submit value=save></form><h3>use in a proxy-conf (server or location)</h3><pre>auth_basic \"Restricted\";\nauth_basic_user_file /config/nginx/.htpasswd;</pre>nginx re-reads the file per request, no reload needed.")
 	page(w, "htpasswd", s.String())
@@ -619,13 +493,15 @@ func htDo(w http.ResponseWriter, r *http.Request) {
 			out = append(out, l)
 		}
 	}
+	nh := ""
 	if op == "add" {
 		b := make([]byte, 8)
 		rand.Read(b)
 		for i := range b {
 			b[i] = a64[int(b[i])&63]
 		}
-		out = append(out, u+":"+apr1(pw, string(b)))
+		nh = apr1(pw, string(b))
+		out = append(out, u+":"+nh)
 	}
 	tmp := htPath + ".tmp"
 	if err := os.WriteFile(tmp, []byte(strings.Join(out, "\n")+"\n"), 0644); err != nil {
@@ -633,5 +509,6 @@ func htDo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	os.Rename(tmp, htPath)
+	htPropagate(u, nh)
 	http.Redirect(w, r, "/htpasswd", 303)
 }

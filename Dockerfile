@@ -1,6 +1,6 @@
 FROM golang:1.23-alpine AS b
 WORKDIR /s
-COPY go.mod main.go features.go issue.go auth.go ./
+COPY go.mod *.go ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /swagui .
 
 FROM scratch
