@@ -806,6 +806,62 @@ func guard(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func main() {
+	// 0. РЕЖИМ ХЕЛСЧЕКА (Docker Healthcheck)
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		// Определяем, какой режим проверять: по переменной окружения или по порту LISTEN
+		// (Если LISTEN равен :2375, значит это Guard, иначе по умолчанию UI)
+		isGuardMode := env("SWAG_MODE", "") == "guard" || env("LISTEN", ":8080") == ":2375"
+
+		if isGuardMode {
+			// --- ХЕЛСЧЕК ДЛЯ РЕЖИМА ПРОКСИ (swag-guard) ---
+			initDocker() // Инициализируем подключение к Docker API
+			
+			cts, derr := loadCts() // Пытаемся получить список контейнеров
+			if derr != "" {
+				fmt.Printf("Healthcheck (Guard) failed: Docker API error: %s\n", derr)
+				os.Exit(1)
+			}
+			
+			// Проверяем, что список успешно получен (может быть и пустым, главное без ошибок API)
+			fmt.Printf("Healthcheck (Guard) OK: successfully fetched %d containers\n", len(cts))
+			os.Exit(0)
+
+		} else {
+			// --- ХЕЛСЧЕК ДЛЯ РЕЖИМА ВЕБ-ИНТЕРФЕЙСА (swag-ui) ---
+			// 1. Проверяем Docker API (так как UI тоже вызывает initDocker и loadCts)
+			initDocker()
+			if _, derr := loadCts(); derr != "" {
+				fmt.Printf("Healthcheck (UI) failed: Docker API error: %s\n", derr)
+				os.Exit(1)
+			}
+
+			// 2. Проверяем чтение конфигурационных файлов Nginx
+			// Вызываем вашу внутреннюю функцию confs(), которая отвечает за получение списка конфигов.
+			// Так как confs() — это HTTP-хендлер, мы сэмулируем запрос к ней без поднятия сети.
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/confs", nil)
+			
+			confs(rec, req) // Вызываем напрямую функцию из main.go
+
+			// Проверяем статус-код ответа хендлера
+			if rec.Code != http.StatusOK {
+				fmt.Printf("Healthcheck (UI) failed: /confs returned status %d\n", rec.Code)
+				os.Exit(1)
+			}
+
+			// Проверяем, что в ответе нет явных признаков ошибки чтения
+			// (Например, если при ошибках вы выводите жирный текст или специфичное слово)
+			body := rec.Body.String()
+			if strings.Contains(body, "error") || strings.Contains(body, "failed") {
+				fmt.Printf("Healthcheck (UI) failed: error found in configs layout\n")
+				os.Exit(1)
+			}
+
+			fmt.Println("Healthcheck (UI) OK: Docker API and Nginx configs are readable")
+			os.Exit(0)
+		}
+	}
+
 	// 1. РЕЖИМ ПРОКСИ (swag-guard)
 	if len(os.Args) > 1 && os.Args[1] == "guard" {
 		log.Printf("[GUARD] Инициализация Docker подключения для прокси-сервера...")
