@@ -477,8 +477,16 @@ func containers(w http.ResponseWriter, r *http.Request) {
 		if n == swag {
 			continue
 		}
+		
 		// 1. Сначала чекаем, делят ли они сеть со SWAG
 		inSameNetwork := shared(c, sn)
+		hostGateway := "172.17.0.1" // Дефолт на крайний случай
+		for _, netConfig := range c.NetworkSettings.Networks {
+			if netConfig.Gateway != "" {
+				hostGateway = netConfig.Gateway
+				break // Берем первый попавшийся рабочий шлюз контейнера
+			}
+		}
 
 		seen, ports, act := map[int]bool{}, []string{}, []string{}
 		for _, p := range c.Ports {
@@ -490,16 +498,23 @@ func containers(w http.ResponseWriter, r *http.Request) {
 				t += fmt.Sprintf("&rarr;%d", p.PublicPort)
 			}
 			ports = append(ports, t)
+			
 			if !seen[p.PrivatePort] {
-				// 2. Выбор порта на основе общей сети:
-				// Если в одной сети — берем родной PrivatePort.
-				// Если в разных сетях и порт проброшен — берем PublicPort.
 				targetPort := p.PrivatePort
+				targetHost := n // Если в одной сети, хост — это имя контейнера
+
+				// Если сети разные, подставляем вычисленный шлюз и PublicPort
 				if !inSameNetwork && p.PublicPort > 0 {
 					targetPort = p.PublicPort
+					targetHost = hostGateway
 				}
 
-				act = append(act, fmt.Sprintf("<a href='/new?name=%s&port=%d'>proxy :%d</a>", url.QueryEscape(n), targetPort, targetPort))
+				act = append(act, fmt.Sprintf("<a href='/new?name=%s&port=%d&host=%s'>proxy :%d</a>", 
+					url.QueryEscape(n), 
+					targetPort, 
+					url.QueryEscape(targetHost), 
+					targetPort,
+				))
 			}
 			seen[p.PrivatePort] = true
 		}
@@ -654,7 +669,7 @@ const tpl = `server {
     listen 443 ssl;
     listen [::]:443 ssl;
 
-    server_name %[1]s.*;
+    server_name %[1]s.*; # Имя контейнера (субдомен)
 
     include /config/nginx/ssl.conf;
     client_max_body_size 0;
@@ -662,8 +677,8 @@ const tpl = `server {
     location / {
         include /config/nginx/proxy.conf;
         include /config/nginx/resolver.conf;
-        set $upstream_app %[1]s;
-        set $upstream_port %[2]s;
+        set $upstream_app %[2]s;   # Сюда прилетит либо имя контейнера, либо IP шлюза
+        set $upstream_port %[3]s;  # Сюда прилетит Private или Public порт
         set $upstream_proto http;
         proxy_pass $upstream_proto://$upstream_app:$upstream_port;
     }
@@ -687,11 +702,15 @@ func form(w http.ResponseWriter, f, content string, isNew bool) {
 
 func newf(w http.ResponseWriter, r *http.Request) {
 	n, p := r.URL.Query().Get("name"), r.URL.Query().Get("port")
+	h := r.URL.Query().Get("host")
 	if n == "" {
 		form(w, "proxy-confs/name.subdomain.conf", "", true)
 		return
 	}
-	form(w, "proxy-confs/"+n+".subdomain.conf", fmt.Sprintf(tpl, n, p), true)
+	if h == "" {
+		h = n
+	}
+	form(w, "proxy-confs/"+n+".subdomain.conf", fmt.Sprintf(tpl, n, h, p), true)
 }
 
 func edit(w http.ResponseWriter, r *http.Request) {
