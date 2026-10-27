@@ -477,6 +477,9 @@ func containers(w http.ResponseWriter, r *http.Request) {
 		if n == swag {
 			continue
 		}
+		// 1. Сначала чекаем, делят ли они сеть со SWAG
+		inSameNetwork := shared(c, sn)
+
 		seen, ports, act := map[int]bool{}, []string{}, []string{}
 		for _, p := range c.Ports {
 			if p.Type != "tcp" || (seen[p.PrivatePort] && p.PublicPort == 0) {
@@ -488,7 +491,15 @@ func containers(w http.ResponseWriter, r *http.Request) {
 			}
 			ports = append(ports, t)
 			if !seen[p.PrivatePort] {
-				act = append(act, fmt.Sprintf("<a href='/new?name=%s&port=%d'>proxy :%d</a>", url.QueryEscape(n), p.PrivatePort, p.PrivatePort))
+				// 2. Выбор порта на основе общей сети:
+				// Если в одной сети — берем родной PrivatePort.
+				// Если в разных сетях и порт проброшен — берем PublicPort.
+				targetPort := p.PrivatePort
+				if !inSameNetwork && p.PublicPort > 0 {
+					targetPort = p.PublicPort
+				}
+
+				act = append(act, fmt.Sprintf("<a href='/new?name=%s&port=%d'>proxy :%d</a>", url.QueryEscape(n), targetPort, targetPort))
 			}
 			seen[p.PrivatePort] = true
 		}
