@@ -5,6 +5,7 @@ services:
     entrypoint: ["/swagui", "guard"]
     restart: unless-stopped
     environment:
+      - SWAG_MODE=guard
       - SWAG_CONTAINER=swag
       - UI_USER=admin
       - UI_PASS=${UI_PASS}
@@ -26,6 +27,7 @@ services:
     image: ghcr.io/pushkinmazila2/swag-ui:latest
     restart: unless-stopped
     environment:
+      - SWAG_MODE=ui
       - SWAG_CONTAINER=swag
       - DOCKER_HOST=tcp://swag-guard:2375
       - UI_USER=admin
