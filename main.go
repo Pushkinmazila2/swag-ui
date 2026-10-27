@@ -663,7 +663,7 @@ const tpl = `server {
     listen 443 ssl;
     listen [::]:443 ssl;
 
-    server_name %[1]s.*; # Имя контейнера (субдомен)
+    server_name %[1]s.*;
 
     include /config/nginx/ssl.conf;
     client_max_body_size 0;
@@ -671,8 +671,8 @@ const tpl = `server {
     location / {
         include /config/nginx/proxy.conf;
         include /config/nginx/resolver.conf;
-        set $upstream_app %[2]s;   # Сюда прилетит либо имя контейнера, либо IP шлюза
-        set $upstream_port %[3]s;  # Сюда прилетит Private или Public порт
+        set $upstream_app %[2]s;
+        set $upstream_port %[3]s;
         set $upstream_proto http;
         proxy_pass $upstream_proto://$upstream_app:$upstream_port;
     }
