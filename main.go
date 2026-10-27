@@ -480,13 +480,7 @@ func containers(w http.ResponseWriter, r *http.Request) {
 		
 		// 1. Сначала чекаем, делят ли они сеть со SWAG
 		inSameNetwork := shared(c, sn)
-		hostGateway := "172.17.0.1" // Дефолт на крайний случай
-		for _, netConfig := range c.NetworkSettings.Networks {
-			if netConfig.Gateway != "" {
-				hostGateway = netConfig.Gateway
-				break // Берем первый попавшийся рабочий шлюз контейнера
-			}
-		}
+		hostGateway := "172.17.0.1" // Дефолт на случай разных сетей (или можно "host.docker.internal")
 
 		seen, ports, act := map[int]bool{}, []string{}, []string{}
 		for _, p := range c.Ports {
@@ -503,7 +497,7 @@ func containers(w http.ResponseWriter, r *http.Request) {
 				targetPort := p.PrivatePort
 				targetHost := n // Если в одной сети, хост — это имя контейнера
 
-				// Если сети разные, подставляем вычисленный шлюз и PublicPort
+				// Если сети разные, подставляем вычисленный шлюз хоста и PublicPort
 				if !inSameNetwork && p.PublicPort > 0 {
 					targetPort = p.PublicPort
 					targetHost = hostGateway
